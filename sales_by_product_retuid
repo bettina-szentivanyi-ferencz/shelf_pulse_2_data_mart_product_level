@@ -1,0 +1,26 @@
+select * from (Select * 
+	FROM `trax-cpg-dwh-int.external.rinielsen2_sales_april2021` rinielsen2_burst_category_sales_fact
+	LEFT JOIN (SELECT distinct project_name, region_id, region_name FROM `trax-cpg-dwh-int.prod.store_dim` store_dim where project_name='rinielsen2') rg ON rinielsen2_burst_category_sales_fact.region_fk = rg.region_id
+	LEFT JOIN (SELECT distinct retailer_id, retailer_name FROM `trax-cpg-dwh-int.prod.store_dim` store_dim where project_name='rinielsen2') rt ON rinielsen2_burst_category_sales_fact.retailer_fk = rt.retailer_id
+	LEFT JOIN (SELECT distinct store_type_id, store_type_name FROM `trax-cpg-dwh-int.prod.store_dim` store_dim where project_name='rinielsen2') st ON rinielsen2_burst_category_sales_fact.store_type_fk = st.store_type_id
+   LEFT JOIN (SELECT distinct store_additional_attribute_6 FROM `trax-cpg-dwh-int.prod.store_dim` store_dim where project_name='rinielsen2') sa6 ON rinielsen2_burst_category_sales_fact.channel = sa6.store_additional_attribute_6
+   LEFT JOIN (SELECT distinct store_dim.store_additional_attribute_16 FROM `trax-cpg-dwh-int.prod.store_dim` store_dim where project_name='rinielsen2') sa16 ON rinielsen2_burst_category_sales_fact.trade_market = sa16.store_additional_attribute_16
+	LEFT JOIN `trax-cpg-dwh-int.prod.product_dim` product_dim ON rinielsen2_burst_category_sales_fact.product_fk = product_dim.product_id and product_dim.project_name='rinielsen2' AND product_dim.is_latest_version = TRUE AND product_dim.product_type IN ('SKU','Other','Empty') and product_dim.category_id=4 
+   LEFT JOIN project_tables.rinielsen2_burst_cycles pl ON rinielsen2_burst_category_sales_fact.plan_fk = pl.pk
+    WHERE EXISTS
+		(SELECT
+			1
+		FROM `trax-cpg-dwh-int.prod.store_dim` st
+		WHERE rinielsen2_burst_category_sales_fact.region_fk = st.region_id
+			AND rinielsen2_burst_category_sales_fact.retailer_fk = st.retailer_id
+			AND rinielsen2_burst_category_sales_fact.store_type_fk = st.store_type_id
+			AND rinielsen2_burst_category_sales_fact.channel = st.store_additional_attribute_6
+			AND rinielsen2_burst_category_sales_fact.trade_market = st.store_additional_attribute_16)
+            ) as table
+    where  plan_fk=11
+    and product_fk=10079
+    and region_fk=5
+    and retailer_fk=9
+    and store_type_fk=32
+    and channel='Mass'
+    and trade_market='Target Pfresh'
