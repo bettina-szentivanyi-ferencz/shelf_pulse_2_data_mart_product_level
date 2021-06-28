@@ -1,0 +1,56 @@
+select distinct product_id,retailer_id, store_type_id,region_id,store_additional_attribute_6,store_additional_attribute_16, sum(FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) as facing_sos, sum(LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) as linear_sos from (SELECT
+		kpi_fact.visit_date,
+		kpi_fact.session_fk,
+        product_dim.product_id,
+          product_dim.manufacturer_name,
+          product_dim.category_name,
+		CASE
+			WHEN kpi_fact.denominator_type_name= 'product' AND kpi_fact.kpi_name = 'SHELF_DISTRIBUTION_PRODUCT_CATEGORY' THEN kpi_fact.denominator_id
+			WHEN kpi_fact.numerator_type_name= 'product' THEN kpi_fact.numerator_id END AS numerator_id,
+		CASE WHEN kpi_fact.kpi_name = 'PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY' THEN kpi_fact.numerator_result END AS flag_PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator,
+		CASE WHEN kpi_fact.kpi_name = 'SHELF_DISTRIBUTION_PRODUCT_CATEGORY' THEN kpi_fact.numerator_result END AS flag_SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator,
+		CASE WHEN kpi_fact.numerator_type_name = 'shelf' AND kpi_fact.kpi_name = 'SHELF_DISTRIBUTION_PRODUCT_CATEGORY' THEN kpi_fact.numerator_id END AS shelf_number,
+		kpi_fact.store_fk,
+		store_dim.retailer_id,
+		store_dim.retailer_name,
+		store_dim.store_type_id,
+		store_dim.store_type_name,
+		store_dim.region_id,
+		store_dim.region_name,
+		store_dim.store_additional_attribute_6,
+		store_dim.store_additional_attribute_16,
+		1 AS countrows,
+		SUM (CASE WHEN kpi_fact.kpi_name = 'FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE' THEN kpi_fact.numerator_result END) AS FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+		SUM (CASE WHEN kpi_fact.kpi_name = 'LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE' THEN kpi_fact.numerator_result END) AS LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+		SUM (CASE WHEN kpi_fact.kpi_name = 'SHELF_DISTRIBUTION_PRODUCT_CATEGORY' THEN kpi_fact.numerator_result END) AS SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator,
+		SUM (CASE WHEN kpi_fact.kpi_name = 'PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY' THEN kpi_fact.numerator_result END) AS PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator
+	FROM `trax-cpg-dwh-int.prod.kpi_fact` kpi_fact
+	JOIN `trax-cpg-dwh-int.prod.session_dim` session_dim ON kpi_fact.session_fk = session_dim.session_pk AND session_dim.status = 'Completed'  AND session_dim.project_name = 'rinielsen2'
+	JOIN `trax-cpg-dwh-int.prod.store_dim` store_dim ON kpi_fact.store_fk = store_dim.store_pk 
+    AND  store_dim.project_name = 'rinielsen2'
+	AND is_latest_version = TRUE
+	AND is_deleted = FALSE
+	AND (store_is_test = FALSE OR store_is_test IS NULL)
+	AND (store_is_active = TRUE OR store_is_active IS NULL)
+	LEFT JOIN `trax-cpg-dwh-int.prod.scene_dim` scene_dim ON kpi_fact.scene_fk = scene_dim.scene_pk AND scene_dim.status = 6
+    JOIN `trax-cpg-dwh-int.prod.product_dim` product_dim ON kpi_fact.numerator_id = product_dim.product_id  and product_dim.project_name = 'rinielsen2'AND product_dim.is_latest_version = TRUE
+	AND product_dim.product_type IN ('SKU','Other','Empty')
+ --  right join `trax-cpg-dwh-int.external.rinielsen2_burst_category_sales_fact` sales on sales.product_fk=kpi_fact.numerator_id
+    where kpi_fact.project_name='rinielsen2'
+
+	GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19
+    ) as table
+    where visit_date between '2021-04-01' and '2021-04-30' 
+  -- and  manufacturer_name='DOLE FOOD COMPANY INC' 
+   --and region_name='FL' 
+   --and retailer_name='Dollar General'
+   --and product_id=3725
+ -- and category_name='Canned Fruit & Pudding'
+ and product_id=10079
+    and region_id=5
+    and retailer_id=9
+    and store_type_id=32
+    and store_additional_attribute_6='Mass'
+    and store_additional_attribute_16='Target Pfresh'
+  and FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator is not null
+  group by 1,2,3,4,5,6
