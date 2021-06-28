@@ -1,0 +1,15 @@
+select * from `trax-cpg-dwh-int.prod.kpi_fact` kpi_fact
+JOIN `trax-cpg-dwh-int.prod.store_dim` store_dim ON kpi_fact.store_fk = store_dim.store_pk and store_dim.project_name='rinielsen2'
+where numerator_id=10079
+    and region_id=5
+    and retailer_id=9
+    and store_type_id=32
+    and store_additional_attribute_6='Mass'
+    and store_additional_attribute_16='Target Pfresh'
+      and kpi_fact.kpi_name='FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE'
+      and kpi_fact.project_name='rinielsen2'
+      and visit_date between '2021-02-01' and '2021-04-30'
+      	AND is_latest_version = TRUE
+	AND is_deleted = FALSE
+	AND (store_is_test = FALSE OR store_is_test IS NULL)
+	AND (store_is_active = TRUE OR store_is_active IS NULL)
