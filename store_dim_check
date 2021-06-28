@@ -1,0 +1,2 @@
+SELECT *  FROM `trax-cpg-dwh-int.prod.store_dim` 
+where project_name='rinielsen2' and retailer_name='Target' and store_type_name='Target PFresh' and region_name='CA'
