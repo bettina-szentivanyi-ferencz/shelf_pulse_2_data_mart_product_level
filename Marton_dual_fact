@@ -1,0 +1,391 @@
+select * from (-- store dimension pre-filtering
+WITH store_dim AS
+(
+SELECT
+	store_pk,
+	retailer_id,
+	retailer_name,
+	store_type_id,
+	store_type_name,
+	region_id,
+	region_name,
+	store_additional_attribute_6,
+	store_additional_attribute_16,
+	-- create id for store groups
+	COALESCE (retailer_name,'') || COALESCE (store_type_name,'') || COALESCE (region_name,'') || COALESCE (store_additional_attribute_6,'') || COALESCE (store_additional_attribute_16,'') AS ret_uid,
+FROM `trax-cpg-dwh-int.prod.store_dim` 
+WHERE project_name = 'rinielsen2'
+	AND is_latest_version = TRUE
+	AND is_deleted = FALSE
+	AND (store_is_test = FALSE OR store_is_test IS NULL)
+	AND (store_is_active = TRUE OR store_is_active IS NULL)
+	-- add it only if the market has not purchased Ongoing attributes
+	-- AND store_additional_attribute_30 <> 'Ongoing' 
+),
+
+-- product dimension pre-filtering
+product_dim AS
+(
+SELECT
+	product_uid as product_uuid,
+  product_id,
+  category_id,
+	category_name,
+  sub_category_name
+FROM `trax-cpg-dwh-int.prod.product_dim`
+WHERE project_name = 'rinielsen2'
+	AND is_latest_version = TRUE
+	AND product_type IN ('SKU','Other','Empty')
+	-- change it accordingly to purcased categories by the market
+	--AND category_name IN ('Coffee','Cereal & Granola','Beer')
+),
+
+-- session dimension pre-filtering
+session_dim AS
+(
+SELECT
+	session_dim.session_pk,
+	MAX(collection_session_fact.trax_visit_excluded)
+FROM `trax-cpg-dwh-int.prod.session_dim` session_dim
+JOIN prod.collection_session_fact ON session_dim.session_pk = collection_session_fact.session_fk
+WHERE session_dim.project_name = 'rinielsen2'
+	AND collection_session_fact.project_name = 'rinielsen2'
+	AND session_dim.visit_date >= '2019-01-01'
+	AND collection_session_fact.visit_date >= '2019-01-01'
+	AND session_dim.status = 'Completed'
+GROUP BY session_dim.session_pk
+HAVING MAX(collection_session_fact.trax_visit_excluded) = FALSE OR MAX(collection_session_fact.trax_visit_excluded) IS NULL
+),
+
+-- scene dimension pre-filtering
+scene_dim AS
+(
+SELECT
+	scene_dim.scene_pk,
+	MAX(collection_scene_category_fact.trax_category_excluded),
+	COUNT(CASE WHEN collection_scene_category_fact.trax_category_resolution = 'successful' THEN collection_scene_category_fact.trax_category_resolution END),
+	COUNT(collection_scene_category_fact.trax_category_resolution),
+	TRUE as include_scene
+FROM `trax-cpg-dwh-int.prod.scene_dim` scene_dim
+LEFT JOIN prod.collection_scene_category_fact ON scene_dim.scene_pk = collection_scene_category_fact.scene_fk
+LEFT JOIN prod.task_dim ON scene_dim.task_fk = task_dim.task_pk
+WHERE scene_dim.project_name = 'rinielsen2'
+	AND task_dim.project_name = 'rinielsen2'
+	AND collection_scene_category_fact.project_name = 'rinielsen2'
+	AND scene_dim.visit_date >= '2019-01-01'
+	AND collection_scene_category_fact.visit_date >= '2019-01-01'
+	AND collection_scene_category_fact.trax_category_resolution = 'successful'
+	AND task_dim.included_in_secondary_shelf_report = 'N'
+	AND scene_dim.status = 6
+GROUP BY scene_dim.scene_pk
+HAVING
+	(MAX(trax_category_excluded) = FALSE OR MAX(trax_category_excluded) IS NULL)
+	AND COUNT(CASE WHEN collection_scene_category_fact.trax_category_resolution = 'successful' THEN collection_scene_category_fact.trax_category_resolution END) = COUNT(collection_scene_category_fact.trax_category_resolution)
+),
+
+-- kpi fact pre-filtering
+kpi_fact AS
+(
+SELECT
+	visit_date,
+	session_fk AS session_uid,
+	scene_fk,
+	store_fk,
+	kpi_name,
+	denominator_type_name,
+	denominator_id,
+	numerator_type_name,
+	numerator_id,
+	numerator_result
+FROM `trax-cpg-dwh-int.prod.kpi_fact` kpi_fact
+WHERE kpi_fact.visit_date >= '2019-01-01'
+	AND kpi_fact.project_name = 'rinielsen2'
+	AND kpi_fact.kpi_name IN
+			('FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE',
+			'LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE',
+			'SHELF_DISTRIBUTION_PRODUCT_CATEGORY',
+			'PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY')
+),
+
+-- needed to match prodcut id for shelf and other kpis
+trax_measures_without_products AS
+(
+SELECT
+		kpi_fact.visit_date,
+		kpi_fact.session_uid,
+		CASE
+			WHEN kpi_fact.denominator_type_name= 'product' AND kpi_fact.kpi_name = 'SHELF_DISTRIBUTION_PRODUCT_CATEGORY' THEN kpi_fact.denominator_id
+			WHEN kpi_fact.numerator_type_name= 'product' THEN kpi_fact.numerator_id END AS numerator_id,
+		CASE WHEN kpi_fact.kpi_name = 'PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY' THEN kpi_fact.numerator_result END AS flag_PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator,
+		CASE WHEN kpi_fact.kpi_name = 'SHELF_DISTRIBUTION_PRODUCT_CATEGORY' THEN kpi_fact.numerator_result END AS flag_SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator,
+		CASE WHEN kpi_fact.numerator_type_name = 'shelf' AND kpi_fact.kpi_name = 'SHELF_DISTRIBUTION_PRODUCT_CATEGORY' THEN kpi_fact.numerator_id END AS shelf_number,
+		kpi_fact.store_fk,
+		store_dim.retailer_id,
+		store_dim.retailer_name,
+		store_dim.store_type_id,
+		store_dim.store_type_name,
+		store_dim.region_id,
+		store_dim.region_name,
+		store_dim.store_additional_attribute_6,
+		store_dim.store_additional_attribute_16,
+		store_dim.ret_uid,
+		1 AS countrows,
+		SUM (CASE WHEN kpi_fact.kpi_name = 'FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE' THEN kpi_fact.numerator_result END) AS FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+		SUM (CASE WHEN kpi_fact.kpi_name = 'LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE' THEN kpi_fact.numerator_result END) AS LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+		SUM (CASE WHEN kpi_fact.kpi_name = 'SHELF_DISTRIBUTION_PRODUCT_CATEGORY' THEN kpi_fact.numerator_result END) AS SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator,
+		SUM (CASE WHEN kpi_fact.kpi_name = 'PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY' THEN kpi_fact.numerator_result END) AS PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator
+	FROM kpi_fact
+	JOIN session_dim ON kpi_fact.session_uid = session_dim.session_pk
+	JOIN store_dim ON kpi_fact.store_fk = store_dim.store_pk
+	LEFT JOIN scene_dim ON kpi_fact.scene_fk = scene_dim.scene_pk
+	WHERE kpi_fact.scene_fk = ''
+		OR scene_dim.include_scene IS TRUE
+	GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17
+),
+
+--burst cycle extended with the lenght of the cycle period
+--0 = not_defined, 1 = around 4weeks, 2 = around 13weeks
+
+burst_cycle_lenght as
+(
+select
+    *,
+    max(start_date) over (partition by cycle_name) as start_date_1m,
+    case when timestamp_diff(end_date,start_date,day) between 22 and 34 then 1
+        when timestamp_diff(end_date,start_date,day) between 85 and 97 then 2 else 0 end as plan_lenght
+from project_tables.rinielsen2_burst_cycles
+),
+
+-- kpi results measured by Trax
+
+trax_measures AS
+(
+SELECT
+    burst_cycle_lenght.cycle_name,
+    CAST(burst_cycle_lenght.pk AS string) AS category_burst_fk,
+    burst_cycle_lenght.plan_lenght,
+    trax_measures_without_products.session_uid,
+    product_dim.product_uuid,
+    trax_measures_without_products.numerator_id,
+    trax_measures_without_products.flag_PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator,
+    trax_measures_without_products.flag_SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator,
+    trax_measures_without_products.shelf_number,
+    trax_measures_without_products.countrows,
+    trax_measures_without_products.retailer_name,
+    trax_measures_without_products.store_type_name,
+    trax_measures_without_products.retailer_id,
+    trax_measures_without_products.store_type_id,
+    trax_measures_without_products.region_id,
+    trax_measures_without_products.store_additional_attribute_6,
+    trax_measures_without_products.store_additional_attribute_16,
+    trax_measures_without_products.ret_uid,
+    trax_measures_without_products.region_name,
+    COALESCE (product_dim.category_name,'') || '_' || COALESCE (burst_cycle_lenght.cycle_name,'') AS data_segregation,
+    NULL AS latitude,
+    NULL AS longitude,
+    SUM (FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) AS FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+    SUM (LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) AS LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+    SUM (LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) * (1 / 304.8) AS LINEAR_SOS_SKU_feet,
+    SUM (LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) * (1 / 25.4) AS LINEAR_SOS_SKU_inch,
+    SUM (SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator) AS SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator,
+    SUM (PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator) AS PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator,
+    NULL AS linear_mm_sales,
+    NULL AS units,
+    NULL AS primary_facings_sales,
+    NULL AS sales,
+    NULL AS linear_inch_sales,
+    NULL AS linear_feet_sales
+FROM trax_measures_without_products
+JOIN product_dim ON trax_measures_without_products.numerator_id = product_dim.product_id
+JOIN burst_cycle_lenght ON burst_cycle_lenght.category_fk = product_dim.category_id AND trax_measures_without_products.visit_date BETWEEN date(burst_cycle_lenght.start_date_1m) AND date(burst_cycle_lenght.end_date)
+GROUP BY product_dim.category_name, session_uid, product_uuid, flag_PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator, flag_SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator, shelf_number, cycle_name, retailer_name, store_type_name, region_name, category_burst_fk, plan_lenght, trax_measures_without_products.countrows, trax_measures_without_products.store_additional_attribute_6, trax_measures_without_products.store_additional_attribute_16, trax_measures_without_products.numerator_id, trax_measures_without_products.retailer_id, trax_measures_without_products.store_type_id, trax_measures_without_products.region_id, trax_measures_without_products.ret_uid
+),
+
+--temporary sales test table for 13weeks, only to use during development
+nielsen_measures_temp AS
+(
+SELECT
+		burst_cycle_lenght.cycle_name AS cycle_name,
+		product_fk,
+		category_name,
+		product_uuid,
+		region_fk,
+		region_name,
+		retailer_fk,
+		retailer_name,
+		store_type_fk,
+		store_type_name,
+		channel,
+		trade_market,
+		COALESCE (rt.retailer_name,'') || COALESCE (st.store_type_name,'') || COALESCE (rg.region_name,'') || COALESCE (channel,'') || COALESCE (trade_market,'') AS ret_uid,
+		COALESCE (category_name,'') || '_' || COALESCE (burst_cycle_lenght.cycle_name,'') AS data_segregation,
+		sub_category_name,
+		CAST(plan_fk AS string) AS category_burst_fk,
+		burst_cycle_lenght.plan_lenght,
+		SUM(sales) AS sales,
+		SUM(units) AS units,
+		safe_divide (sum(sales), sum(units)) as sales_per_units
+	FROM external.rinielsen2_sales_april2021
+	LEFT JOIN (SELECT distinct region_id, region_name FROM store_dim) rg ON rinielsen2_sales_april2021.region_fk = rg.region_id
+	LEFT JOIN (SELECT distinct retailer_id, retailer_name FROM store_dim) rt ON rinielsen2_sales_april2021.retailer_fk = rt.retailer_id
+	LEFT JOIN (SELECT distinct store_type_id, store_type_name FROM store_dim) st ON rinielsen2_sales_april2021.store_type_fk = st.store_type_id
+	LEFT JOIN product_dim ON rinielsen2_sales_april2021.product_fk = product_dim.product_id
+	LEFT JOIN burst_cycle_lenght ON rinielsen2_sales_april2021.plan_fk = burst_cycle_lenght.pk
+	-- filter out non existent store group combinations (it is a flaw in sales extraction)
+	WHERE EXISTS
+		(SELECT
+			1
+		FROM store_dim
+		WHERE rinielsen2_sales_april2021.region_fk = store_dim.region_id
+			AND rinielsen2_sales_april2021.retailer_fk = store_dim.retailer_id
+			AND rinielsen2_sales_april2021.store_type_fk = store_dim.store_type_id
+			AND rinielsen2_sales_april2021.channel = store_dim.store_additional_attribute_6
+			AND rinielsen2_sales_april2021.trade_market = store_dim.store_additional_attribute_16)
+	GROUP BY category_name, cycle_name, product_fk, product_uuid, region_fk, region_name, retailer_fk, retailer_name, store_type_fk, store_type_name, sub_category_name, plan_fk, plan_lenght, channel, trade_market
+),
+
+
+-- sales results measured by Nielsen 
+nielsen_measures AS
+(
+SELECT
+		burst_cycle_lenght.cycle_name AS cycle_name,
+		product_fk,
+		category_name,
+		product_uuid,
+		region_fk,
+		region_name,
+		retailer_fk,
+		retailer_name,
+		store_type_fk,
+		store_type_name,
+		channel,
+		trade_market,
+		COALESCE (rt.retailer_name,'') || COALESCE (st.store_type_name,'') || COALESCE (rg.region_name,'') || COALESCE (channel,'') || COALESCE (trade_market,'') AS ret_uid,
+		COALESCE (category_name,'') || '_' || COALESCE (burst_cycle_lenght.cycle_name,'') AS data_segregation,
+		sub_category_name,
+		CAST(plan_fk AS string) AS category_burst_fk,
+		burst_cycle_lenght.plan_lenght,
+		SUM(sales) AS sales,
+		SUM(units) AS units,
+		safe_divide (sum(sales), sum(units)) as sales_per_units
+	FROM external.rinielsen2_burst_category_sales_fact
+	LEFT JOIN (SELECT distinct region_id, region_name FROM store_dim) rg ON rinielsen2_burst_category_sales_fact.region_fk = rg.region_id
+	LEFT JOIN (SELECT distinct retailer_id, retailer_name FROM store_dim) rt ON rinielsen2_burst_category_sales_fact.retailer_fk = rt.retailer_id
+	LEFT JOIN (SELECT distinct store_type_id, store_type_name FROM store_dim) st ON rinielsen2_burst_category_sales_fact.store_type_fk = st.store_type_id
+	LEFT JOIN product_dim ON rinielsen2_burst_category_sales_fact.product_fk = product_dim.product_id
+	LEFT JOIN burst_cycle_lenght ON rinielsen2_burst_category_sales_fact.plan_fk = burst_cycle_lenght.pk
+	-- filter out non existent store group combinations (it is a flaw in sales extraction)
+	WHERE EXISTS
+		(SELECT
+			1
+		FROM store_dim
+		WHERE rinielsen2_burst_category_sales_fact.region_fk = store_dim.region_id
+			AND rinielsen2_burst_category_sales_fact.retailer_fk = store_dim.retailer_id
+			AND rinielsen2_burst_category_sales_fact.store_type_fk = store_dim.store_type_id
+			AND rinielsen2_burst_category_sales_fact.channel = store_dim.store_additional_attribute_6
+			AND rinielsen2_burst_category_sales_fact.trade_market = store_dim.store_additional_attribute_16)
+	GROUP BY category_name, cycle_name, product_fk, product_uuid, region_fk, region_name, retailer_fk, retailer_name, store_type_fk, store_type_name, sub_category_name, plan_fk, plan_lenght, channel, trade_market
+	
+--merge the 13weeks test sales data; only use during development
+union all
+select * from nielsen_measures_temp
+),
+
+
+-- calculate kpi results which are dependent on sales data
+trax_measures_for_nielsen AS
+(SELECT
+		trax_measures.numerator_id,
+		trax_measures.retailer_id,
+		trax_measures.store_type_id,
+		trax_measures.region_id,
+		trax_measures.store_additional_attribute_6,
+		trax_measures.store_additional_attribute_16,
+		trax_measures.category_burst_fk,
+		trax_measures.plan_lenght,
+		SUM (FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) AS FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+		SUM (LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) AS LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator
+	FROM trax_measures
+	WHERE FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator is not NULL
+	GROUP BY numerator_id, retailer_id, store_type_id, region_id, category_burst_fk, plan_lenght, store_additional_attribute_6, store_additional_attribute_16)
+
+-- union sales results with kpi results
+SELECT
+	trax_measures.session_uid,
+	trax_measures.product_uuid,
+	trax_measures.flag_PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator,
+	trax_measures.flag_SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator,
+	trax_measures.shelf_number,
+	trax_measures.cycle_name,
+	trax_measures.countrows,
+	trax_measures.retailer_name,
+	trax_measures.store_type_name,
+	trax_measures.ret_uid,
+	trax_measures.region_name,
+	trax_measures.data_segregation,
+	trax_measures.latitude,
+	trax_measures.longitude,
+	trax_measures.category_burst_fk,
+	trax_measures.plan_lenght,
+	trax_measures.FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+	trax_measures.LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+	trax_measures.LINEAR_SOS_SKU_feet,
+	trax_measures.LINEAR_SOS_SKU_inch,
+	trax_measures.SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator,
+	trax_measures.PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator,
+	trax_measures.linear_mm_sales,
+	trax_measures.units,
+	trax_measures.primary_facings_sales,
+	trax_measures.sales,
+	trax_measures.linear_inch_sales,
+	trax_measures.linear_feet_sales,
+	nielsen_measures.sales_per_units,
+	case when trax_measures.shelf_number is not null then safe_multiply (trax_measures.SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator, nielsen_measures.sales_per_units) else null end as sales_per_shelf
+FROM trax_measures
+join nielsen_measures on nielsen_measures.product_uuid = trax_measures.product_uuid and nielsen_measures.ret_uid = trax_measures.ret_uid and nielsen_measures.category_burst_fk = trax_measures.category_burst_fk
+UNION ALL
+SELECT
+	'' AS session_uid,
+	nielsen_measures.product_uuid,
+	NULL AS flag_PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator,
+	NULL AS flag_SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator,
+	NULL AS shelf_number,
+	nielsen_measures.cycle_name,
+	1 AS countrows,
+	nielsen_measures.retailer_name,
+	nielsen_measures.store_type_name,
+	nielsen_measures.ret_uid,
+	nielsen_measures.region_name,
+	nielsen_measures.data_segregation,
+	NULL AS latitude,
+	NULL AS longitude,
+	nielsen_measures.category_burst_fk,
+	nielsen_measures.plan_lenght,
+	NULL AS FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+	NULL AS LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator,
+	NULL AS LINEAR_SOS_SKU_feet,
+	NULL AS LINEAR_SOS_SKU_inch,
+	NULL AS SHELF_DISTRIBUTION_PRODUCT_CATEGORY_numerator,
+	NULL AS PRODUCT_DISTRIBUTION_PER_CATEGORY_AND_SUB_CATEGORY_numerator,
+	SUM(trax_measures_for_nielsen.LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) AS linear_mm_sales,
+	SUM(nielsen_measures.units) AS units,
+	SUM(trax_measures_for_nielsen.FACINGS_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) AS primary_facings_sales,
+	SUM(nielsen_measures.sales) AS sales,
+	SUM(trax_measures_for_nielsen.LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) * (1 / 25.4) AS linear_inch_sales,
+	SUM(trax_measures_for_nielsen.LINEAR_SOS_SKU_OUT_OF_CATEGORY_IN_WHOLE_STORE_numerator) * (1 / 304.8) AS linear_feet_sales,
+	sum(nielsen_measures.sales_per_units) as sales_per_units,
+	null as sales_per_shelf
+FROM nielsen_measures
+JOIN trax_measures_for_nielsen
+	ON nielsen_measures.product_fk = trax_measures_for_nielsen.numerator_id
+	AND nielsen_measures.retailer_fk = trax_measures_for_nielsen.retailer_id
+	AND nielsen_measures.region_fk = trax_measures_for_nielsen.region_id
+	AND nielsen_measures.store_type_fk = trax_measures_for_nielsen.store_type_id
+	AND nielsen_measures.channel = trax_measures_for_nielsen.store_additional_attribute_6
+	AND nielsen_measures.trade_market = trax_measures_for_nielsen.store_additional_attribute_16
+	AND CAST(nielsen_measures.category_burst_fk AS string) = trax_measures_for_nielsen.category_burst_fk
+GROUP BY product_uuid, cycle_name, retailer_name, store_type_name, region_name, category_burst_fk, plan_lenght, nielsen_measures.category_name, nielsen_measures.ret_uid, nielsen_measures.data_segregation)
+as table 
+where ret_uid ='TargetTarget PFreshCAMassTarget Pfresh'
+and product_uuid = '10d2e740-25ce-11eb-9681-1741cc5fa2f4'
