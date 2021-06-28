@@ -1,0 +1,2 @@
+SELECT *  FROM `trax-cpg-dwh-int.prod.product_dim` 
+where project_name='rinielsen2' and product_uid='01147260-25ce-11eb-9681-1741cc5fa2f4'
