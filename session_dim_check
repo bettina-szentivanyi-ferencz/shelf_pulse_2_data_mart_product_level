@@ -1,0 +1,2 @@
+select * from `trax-cpg-dwh-int.prod.session_dim` 
+where session_pk='6f9c406c-b5bd-4a03-83de-daf66b6d3f18'
